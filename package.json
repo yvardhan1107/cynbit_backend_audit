@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Production-grade Node.js & Express.js Backend Architecture, Security Hardening, and Technical Audit for Cynbit Technologies",
   "main": "src/server.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yvardhan1107/cynbit_backend_audit.git"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
@@ -14,10 +18,12 @@
     "security-audit",
     "backend-architecture",
     "rate-limiting",
+    "idempotency",
     "rbac",
+    "owasp",
     "cynbit"
   ],
-  "author": "Backend Engineering Candidate",
+  "author": "Yashvardhan",
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
