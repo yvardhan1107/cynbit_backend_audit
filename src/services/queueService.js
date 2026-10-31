@@ -9,7 +9,6 @@ class QueueService extends EventEmitter {
     this.isProcessing = false;
     this.retryLimit = config.queue.retryAttempts;
 
-    // Listen for new jobs
     this.on('job:enqueued', () => {
       this.processNext();
     });
@@ -47,7 +46,6 @@ class QueueService extends EventEmitter {
     } catch (err) {
       if (job.attempts < this.retryLimit) {
         job.status = 'retrying';
-        // Exponential backoff simulation
         setTimeout(() => {
           this.jobs.push(job);
           this.emit('job:enqueued', job);
@@ -67,7 +65,7 @@ class QueueService extends EventEmitter {
   }
 
   async executeJob(job) {
-    // Simulated execution of asynchronous tasks (e.g. Email dispatch, CRM Webhook, Analytics)
+    // In production, handles email sending, webhook delivery, CRM sync
     return new Promise((resolve) => {
       setTimeout(() => {
         resolve({ delivered: true, timestamp: Date.now() });

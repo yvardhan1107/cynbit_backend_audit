@@ -9,7 +9,7 @@ const securityHeaders = helmet({
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "https://cynbit.in", "https://*.cynbit.in"],
       connectSrc: ["'self'", "https://cynbit.in", "https://www.google-analytics.com"],
-      frameAncestors: ["'none'"], // Prevent clickjacking
+      frameAncestors: ["'none'"],
       objectSrc: ["'none'"],
       upgradeInsecureRequests: [],
     },
@@ -17,15 +17,15 @@ const securityHeaders = helmet({
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: { policy: 'same-site' },
   dnsPrefetchControl: { allow: false },
-  frameguard: { action: 'deny' }, // Anti-clickjacking fallback
-  hidePoweredBy: true, // Conceal Express fingerprint
+  frameguard: { action: 'deny' },
+  hidePoweredBy: true,
   hsts: {
     maxAge: 63072000,
     includeSubDomains: true,
     preload: true,
   },
   ieNoOpen: true,
-  noSniff: true, // X-Content-Type-Options: nosniff
+  noSniff: true,
   originAgentCluster: true,
   permittedCrossDomainPolicies: { permittedPolicies: 'none' },
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },

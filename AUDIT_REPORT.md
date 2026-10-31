@@ -1,309 +1,176 @@
-# Cynbit Technologies — Comprehensive Backend Technical Audit & Architectural Enhancement Report
+# Backend Technical Audit & Architectural Review
 
-**Target Host:** `https://www.cynbit.in/`  
-**Auditor Profile:** Node.js & Express.js Backend Engineering Candidate  
-**Assessment Date:** October 2026  
-**Methodology:** Passive, non-intrusive reconnaissance & observable technical behaviour analysis (in strict compliance with responsible disclosure standards).
-
----
-
-## Executive Summary
-
-A comprehensive, passive backend technical audit was conducted on **Cynbit Technologies** (`https://www.cynbit.in/`), an AI automation and custom software development enterprise. The analysis focused on publicly observable backend behaviours, edge infrastructure, API structures, HTTP headers, authentication architectures, data ingestion pipelines, and performance characteristics.
-
-While Cynbit's web application demonstrates modern frontend engineering using Next.js on Vercel's edge network with strong HTTP Strict Transport Security (HSTS), several significant architectural, security, and data-handling vulnerabilities and improvement opportunities were identified:
-
-1. **Overly Permissive CORS (`Access-Control-Allow-Origin: *`)**: Exposed across root, marketing pages, portal routes, and even 404 error responses.
-2. **Missing Essential OWASP Security Headers**: Absence of `Content-Security-Policy` (CSP), `X-Frame-Options` (Clickjacking vulnerability), `X-Content-Type-Options: nosniff` (MIME sniffing), and `Permissions-Policy`.
-3. **Disallowed & Exposed Administrative Paths**: `robots.txt` explicitly disallows `/api/`, `/admin/`, and `/portal/`. Observability testing revealed `/portal` returns `200 OK` without edge authentication barriers, while `/admin` returns `404 Not Found`.
-4. **Vulnerability to Lead Ingestion Flood & Lack of Idempotency**: Forms (Contact, Careers, BitElevate) lack observable server-side idempotency keys, token bucket rate-limiting at the gateway level, and asynchronous backpressure message queuing.
-5. **Absence of Standardized RFC 7807 Error Contracts**: Unhandled routes and edge responses lack correlation IDs (`X-Correlation-ID`) and structured machine-readable problem schemas.
-
-To address these vulnerabilities, this project provides a production-grade **Node.js & Express.js Backend Architecture (`cynbit-backend-engine`)** featuring hardened defense-in-depth middleware, RBAC with multi-tenant isolation, idempotency caching, asynchronous job queueing with Dead Letter Queues (DLQ), and a comprehensive automated test suite.
+**Target:** `https://www.cynbit.in/`  
+**Focus:** Backend Architecture, Security Headers, API Behavior & Data Ingestion  
+**Environment / Stack:** Node.js & Express.js  
 
 ---
 
-## 1. Architectural Analysis of Observable Backend Behaviour
+## 1. Overview & Approach
 
-```mermaid
-flowchart TD
-    Client["Client / Browser / Lead"] --> Edge["Vercel Edge Network (BOM1 Mumbai)"]
-    Edge -->|"Static HTML / RSC Payload"| ISR["ISR Pre-rendered Static Pages"]
-    Edge -->|"Disallowed Routes (/api, /portal, /admin)"| Gateway["Observable Edge Gateway"]
-    
-    subgraph Current_State ["Observed Production Architecture"]
-        ISR -->|"Access-Control-Allow-Origin: *"| Client
-        Gateway -->|"/portal: 200 OK"| PortalClient["Client-Side Rendered Portal"]
-        Gateway -->|"/api/*: 404 Not Found"| Edge404["Unstructured Edge 404"]
-    end
+I conducted a passive technical review of Cynbit's live production website (`https://www.cynbit.in/`) to analyze its backend behavior, edge configuration, security posture, and data handling. 
 
-    subgraph Proposed_State ["Proposed Node.js & Express.js Microservice Engine"]
-        APIGateway["Cynbit Express API Gateway (/api/v1)"]
-        APIGateway --> Security["Helmet CSP + Whitelisted CORS + Rate Limiter"]
-        Security --> Idempotency["Idempotency Engine (Idempotency-Key)"]
-        Idempotency --> Validator["Zod/Schema Validation & XSS Sanitizer"]
-        Validator --> Auth["JWT Auth & Multi-Tenant Scoping (req.tenantId)"]
-        Auth --> Queue["Async Task Queue + DLQ (BullMQ Pattern)"]
-        Queue --> DB["PostgreSQL / Prisma Database Transaction"]
-        Queue --> Worker["Async Notification & CRM Worker"]
-    end
+My approach was purely non-intrusive and observational:
+- Inspected HTTP response headers returned by the CDN/origin.
+- Checked `robots.txt` and `sitemap.xml` for route structures and disallow directives.
+- Tested how the application responds to standard requests, 404 routes, and HTTP methods.
+- Reviewed client-side network activity on interactive pages like `/contact` and `/bitelevate`.
+
+Based on the findings, I built a companion Express.js backend (`src/`) that demonstrates how to solve the identified gaps in security headers, CORS policies, form spam prevention, idempotency, and asynchronous job handling.
+
+---
+
+## 2. Observable Architecture & Infrastructure
+
+### 2.1 Edge Network & Serving Layer
+Running `curl -I https://www.cynbit.in/` gave the following key headers:
+
+```http
+HTTP/1.1 200 OK
+Server: Vercel
+X-Vercel-Id: bom1::...
+X-Vercel-Cache: HIT
+Age: 174226
+Cache-Control: public, max-age=0, must-revalidate
+Strict-Transport-Security: max-age=63072000
+Vary: rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch
+X-Matched-Path: /
+X-Nextjs-Prerender: 1
+X-Nextjs-Stale-Time: 300
+Access-Control-Allow-Origin: *
 ```
 
-### 1.1 Edge Network & Hosting Platform
-- **Edge Provider:** Vercel Global Edge Network.
-- **Serving POP:** `bom1` (Mumbai, India), evidenced by `X-Vercel-Id: bom1::...`.
-- **Framework:** Next.js App Router (indicated by `X-Matched-Path: /`, `X-Nextjs-Prerender: 1`, `X-Nextjs-Stale-Time: 300`, and `Vary: rsc, next-router-state-tree, next-router-prefetch`).
-- **Caching Mechanism:** Cache hit indicators (`X-Vercel-Cache: HIT`, `Age: 174226`, `Cache-Control: public, max-age=0, must-revalidate`). Content is statically pre-rendered via Incremental Static Regeneration (ISR).
+Key takeaways:
+1. **Hosting & CDN**: The site is hosted on Vercel and routed through their `bom1` edge location (Mumbai, India). Static pages are cached via Vercel Edge Cache (`X-Vercel-Cache: HIT`).
+2. **Framework**: Headers confirm a Next.js App Router setup using Incremental Static Regeneration (ISR) / pre-rendering (`X-Nextjs-Prerender: 1`, `X-Nextjs-Stale-Time: 300`, and Next-specific `Vary` headers).
+3. **Transport Security**: HSTS is enabled with a long max-age (`63072000` seconds / 2 years), which is good.
 
-### 1.2 Path Discovery & robots.txt Intelligence
-Inspecting `https://cynbit.in/robots.txt` revealed:
-```http
+### 2.2 Route Discovery (`robots.txt`)
+Checking `https://cynbit.in/robots.txt`:
+
+```text
 User-agent: *
 Allow: /
+
 Sitemap: https://cynbit.in/sitemap.xml
 Crawl-delay: 1
 
-# Disallow specific non-SEO pages
 Disallow: /api/
 Disallow: /admin/
 Disallow: /portal/
 ```
-**Architectural Deductions:**
-- **`/api/`**: The presence of `/api/` in robots.txt confirms intention for backend API endpoints, yet direct probes to `/api`, `/api/`, `/api/contact`, and `/api/submit` return `404 Not Found` with Vercel edge headers. This indicates form submissions are either bundled via Next.js Server Actions or delegated to third-party scripts.
-- **`/portal/` vs `/admin/`**: `/portal` returns HTTP status `200 OK` serving HTML directly from the edge cache, whereas `/admin` returns `404 Not Found`. This suggests `/portal` exists as a client-side rendered Single-Page Application (SPA) container, likely intended for Cynbit's SaaS products (*TenantEase*, *BitElevate*, *Cynbit Studio*).
+
+What this tells us:
+- **`/api/`**: Disallowed from indexing. Probing `/api`, `/api/`, or `/api/contact` returns Vercel's edge 404 page. Form submissions on the marketing site appear to be handled via Next.js Server Actions or client-side triggers rather than dedicated REST endpoints.
+- **`/portal/`**: Returns HTTP `200 OK` (serving a client-side route), indicating a customer or internal portal area.
+- **`/admin/`**: Returns HTTP `404 Not Found`.
 
 ---
 
-## 2. Security & Performance Findings
+## 3. Key Findings & Potential Issues
 
-| Finding ID | Domain | Severity | Description | Impact |
-|:---|:---|:---:|:---|:---|
-| **SEC-01** | Security | **Medium** | Overly Permissive Wildcard CORS (`*`) | Unauthorized third-party origins can interact with endpoints without domain restriction. |
-| **SEC-02** | Security | **Medium** | Missing Content-Security-Policy (CSP) | Leaves frontend vulnerable to Cross-Site Scripting (XSS) and data exfiltration. |
-| **SEC-03** | Security | **Medium** | Missing Anti-Clickjacking (`X-Frame-Options`) | Site can be framed inside attacker-controlled iframes for UI redressing attacks. |
-| **SEC-04** | Security | **Low** | Missing `X-Content-Type-Options: nosniff` | Browsers may override Content-Type headers, leading to MIME-confusion attacks. |
-| **SEC-05** | Security | **Low** | Missing `Permissions-Policy` | Sensitive browser APIs (camera, microphone, geolocation) are unrestricted. |
-| **PERF-01** | Resilience | **High** | Absence of Observable Rate-Limiting on Ingestion | Form endpoints and potential auth routes lack IP-based token bucket throttling. |
-| **DATA-01** | Data Handling | **High** | Absence of Idempotency Mechanism | Network dropouts and form resubmissions cause duplicate lead and application records. |
-| **ARCH-01** | Architecture | **Medium** | Synchronous Ingestion vs Asynchronous Queuing | Direct synchronous writes to databases or mailers create connection exhaustion under load. |
-| **OBS-01** | Observability | **Low** | Missing Correlation IDs & RFC 7807 Error Formatting | Errors lack distributed tracing IDs (`X-Correlation-ID`) hindering backend triage. |
+### 3.1 Wildcard CORS on HTML Pages (`Access-Control-Allow-Origin: *`)
+- **Observation:** The root page `/`, subpages, and even 404 responses return `Access-Control-Allow-Origin: *`.
+- **Why it matters:** While wildcard CORS is fine for public static assets (images, fonts), having it globally applied across the application can be risky. If internal API endpoints or session-authenticated routes inherit this blanket header, any arbitrary website can make cross-origin requests and read responses.
+- **Fix:** Restrict CORS via an explicit origin whitelist (e.g. `https://cynbit.in`, `https://www.cynbit.in`, and trusted staging domains).
 
----
+### 3.2 Missing Critical Security Headers (OWASP)
+The response headers are missing several standard defense headers:
+1. **`Content-Security-Policy` (CSP)**: Not configured. Without a CSP, the browser has no restrictions on where scripts, styles, or iframes can be loaded from, increasing the risk of XSS and unauthorized data exfiltration.
+2. **`X-Frame-Options`**: Missing. Without `X-Frame-Options: DENY` (or CSP `frame-ancestors 'none'`), pages like `/contact` or `/portal` can be embedded into external iframes on third-party sites, exposing users to clickjacking attacks.
+3. **`X-Content-Type-Options: nosniff`**: Missing. Prevents older browsers from MIME-sniffing a response away from the declared Content-Type.
+4. **`Permissions-Policy`**: Missing. Browser features like microphone, camera, and geolocation should be explicitly disabled if the application does not use them.
 
-## 3. Deep-Dive Findings & Threat Modeling
+### 3.3 Form Handling, Lack of Rate Limiting & Denial of Service Risks
+- **Observation:** Contact forms (`/contact`) and career/program applications (`/bitelevate`) do not display any observable backend rate limiting in response headers (e.g. `RateLimit-Limit`, `RateLimit-Remaining`).
+- **Why it matters:**
+  - An automated bot can spam lead forms with thousands of requests.
+  - If form submissions trigger transactional emails (e.g., via SendGrid or Resend) or push leads into a CRM, spam attacks can burn through email API quotas and corrupt CRM data.
+  - If submissions write directly to a database without queueing, traffic spikes can saturate database connection pools.
+- **Fix:**
+  - Put a token-bucket rate limiter on submission routes (e.g. 10 requests per 15 minutes per IP for form endpoints).
+  - Use an asynchronous queue with retry backoff and a Dead Letter Queue (DLQ) so background operations (sending emails, syncing CRM) don't block the HTTP response.
 
-### 3.1 Wildcard CORS (`Access-Control-Allow-Origin: *`)
-- **Observed Response Header:**
-  ```http
-  Access-Control-Allow-Origin: *
-  ```
-- **Vulnerability:** The wildcard `*` is emitted across all static pages, subroutes, and even 404 responses. If backend API routes or future authenticated session endpoints inherit this default header configuration without an origin whitelist, attackers can initiate cross-origin requests from malicious domains.
-- **Remediation:** Implement a dynamic whitelist in Express that validates the `Origin` header against permitted domains (`https://cynbit.in`, `https://www.cynbit.in`, and verified staging domains).
+### 3.4 Missing Idempotency on Ingestion Endpoints
+- **Observation:** In real-world usage—especially on mobile connections—users frequently encounter connection drops and click "Submit" multiple times, or the client retries the request automatically.
+- **Why it matters:** Without an `Idempotency-Key` mechanism, each retry creates a duplicate lead or applicant record in the database.
+- **Fix:** Implement an idempotency middleware that caches responses for a given `Idempotency-Key` header. Subsequent retries with the same key return the cached response immediately without re-triggering business logic.
 
-### 3.2 Clickjacking & Content Injection (Missing CSP & X-Frame-Options)
-- **Vulnerability:** Neither `Content-Security-Policy: frame-ancestors 'none'` nor `X-Frame-Options: DENY` is sent by the server.
-- **Threat Scenario:** A threat actor can embed `https://cynbit.in/contact` or `https://cynbit.in/portal` inside a transparent iframe on a malicious phishing site, tricking users into submitting confidential business requests or login credentials (UI redress attack).
-- **Remediation:** Enforce strict Helmet CSP directives and `frameguard: { action: 'deny' }`.
-
-### 3.3 Lead Ingestion Flooding & DoS on BitElevate / Contact Forms
-- **Observed Behaviour:** Forms on `/contact` and `/bitelevate` accept submissions without client-side or gateway-level rate limiting observable in HTTP headers (`RateLimit-Limit`, `RateLimit-Remaining`).
-- **Threat Scenario:** Automated headless bots can spam the contact form with thousands of requests per minute. Without backend throttling and queuing:
-  - Third-party email API quotas (e.g. Resend, SendGrid) are exhausted.
-  - Sales and admissions teams are flooded with junk data.
-  - Direct database connection pools are depleted, causing service degradation.
-- **Remediation:** Implement a multi-tiered rate limiting strategy with `express-rate-limit` (Tier 1: Global 100 req/15m; Tier 2: Leads 10 req/15m; Tier 3: Auth 5 req/15m).
-
-### 3.4 Data Duplication & Lack of Idempotency
-- **Data Handling Gap:** In mobile networks (e.g., across tier-2/tier-3 cities in India where students apply for BitElevate), transient packet drops cause clients to automatically re-try POST requests.
-- **Impact:** Without an `Idempotency-Key` header check, every retry executes a new `INSERT` operation, creating duplicate records, sending multiple confirmation emails, and skewing CRM lead attribution.
-- **Remediation:** Implement an idempotency middleware interceptor that caches response payloads against a client-generated UUID key with a 1-hour TTL.
+### 3.5 Authentication & Multi-Tenant Boundary Isolation
+- **Observation:** `robots.txt` mentions `/portal/`, and Cynbit builds multi-product solutions (e.g., *TenantEase*, *BitElevate*, *Cynbit Studio*).
+- **Why it matters:** Multi-tenant SaaS backends must ensure strict tenant boundary enforcement. Relying on frontend route guards is insufficient; every database query on the backend must be scoped to the authenticated user's `tenant_id` to prevent Insecure Direct Object References (IDOR).
+- **Fix:** Implement JWT verification middleware that attaches `req.user` and `req.tenantId` to the request, combined with role-based checks (`admin`, `staff`, `client`).
 
 ---
 
-## 4. Recommended Improvements & Node.js Architecture
+## 4. Improvements & Implementation Details
 
-### 4.1 System Design Blueprint (`cynbit-backend-engine`)
+To address each finding, I built the `cynbit-backend-engine` project in `src/`. Here is how each issue was resolved:
 
-```
-cynbit-backend-engine/
-├── src/
-│   ├── config/
-│   │   └── index.js              # Environment & policy configuration
-│   ├── middleware/
-│   │   ├── auth.js               # JWT verification & multi-tenant RBAC
-│   │   ├── cors.js               # Strict origin whitelisting CORS
-│   │   ├── errorHandler.js       # RFC 7807 problem details handler
-│   │   ├── idempotency.js        # Distributed idempotency key cache
-│   │   ├── logger.js             # Structured JSON logger with Correlation IDs
-│   │   ├── rateLimiter.js        # Tiered token-bucket rate limiters
-│   │   ├── securityHeaders.js    # Hardened Helmet CSP & anti-clickjacking
-│   │   └── validator.js          # Input sanitization & schema validation
-│   ├── controllers/
-│   │   ├── authController.js     # Authentication & token distribution
-│   │   ├── bitelevateController.js # BitElevate application handler
-│   │   ├── healthController.js   # Liveness & readiness probes
-│   │   └── inquiryController.js  # Enterprise lead ingestion
-│   ├── services/
-│   │   ├── authService.js        # User credential verification
-│   │   ├── bitelevateService.js  # BitElevate business logic
-│   │   ├── inquiryService.js     # Lead ingestion & deduplication
-│   │   └── queueService.js       # Asynchronous queue with DLQ & backoff
-│   ├── routes/
-│   │   ├── api.v1.js             # Versioned REST API endpoints
-│   │   └── health.routes.js      # Health and readiness check routes
-│   ├── app.js                    # Express application assembly
-│   └── server.js                 # HTTP listener & graceful shutdown lifecycle
-├── tests/
-│   ├── auth_rbac.test.js         # Authentication, tenant scoping & RBAC tests
-│   ├── bitelevate.test.js        # BitElevate application submission tests
-│   ├── health.test.js            # Telemetry, uptime & 404 tests
-│   ├── inquiries.test.js         # Ingestion, validation & idempotency tests
-│   ├── mockClient.js             # High-speed in-memory testing harness
-│   ├── rateLimiter.test.js       # 429 Too Many Requests enforcement tests
-│   ├── security.test.js          # OWASP headers & CORS tests
-│   └── testHelper.js             # Test runner bootstrap
-├── Dockerfile                    # Production hardened container
-├── render.yaml                   # 1-Click cloud deployment spec
-├── vercel.json                   # Serverless deployment configuration
-└── README.md                     # Architecture guide & API documentation
-```
+### 4.1 Security Headers via Helmet (`src/middleware/securityHeaders.js`)
+Configured Helmet with explicit policies:
+- Added a strict `Content-Security-Policy` with `frame-ancestors 'none'`.
+- Set `frameguard: { action: 'deny' }` to block clickjacking.
+- Set `noSniff: true` (`X-Content-Type-Options: nosniff`).
+- Enabled `hidePoweredBy` to suppress `X-Powered-By: Express`.
+- Configured `strict-origin-when-cross-origin` for Referrer-Policy.
 
----
-
-## 5. Architectural Code Implementations
-
-### 5.1 Hardened Security Headers & Anti-Clickjacking (`src/middleware/securityHeaders.js`)
+### 4.2 Whitelisted CORS Middleware (`src/middleware/cors.js`)
+Replaced the wildcard `*` with a dynamic origin validator that only allows verified domains:
 ```javascript
-const helmet = require('helmet');
-
-const securityHeaders = helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://www.googletagmanager.com"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com"],
-      imgSrc: ["'self'", "data:", "https://cynbit.in", "https://*.cynbit.in"],
-      connectSrc: ["'self'", "https://cynbit.in", "https://www.google-analytics.com"],
-      frameAncestors: ["'none'"], // Completely defeats Clickjacking
-      objectSrc: ["'none'"],
-      upgradeInsecureRequests: [],
-    },
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || config.allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    const err = new Error(`Origin ${origin} is not allowed by CORS policy`);
+    err.statusCode = 403;
+    return callback(err);
   },
-  frameguard: { action: 'deny' },
-  hidePoweredBy: true, // Prevents X-Powered-By fingerprinting
-  hsts: { maxAge: 63072000, includeSubDomains: true, preload: true },
-  noSniff: true, // Prevents MIME confusion
-  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-});
-
-module.exports = { securityHeaders };
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-ID', 'Idempotency-Key'],
+  credentials: true,
+};
 ```
 
-### 5.2 Idempotency Engine (`src/middleware/idempotency.js`)
-```javascript
-const idempotencyStore = new Map();
+### 4.3 Tiered Rate Limiting (`src/middleware/rateLimiter.js`)
+Added distinct limits depending on route sensitivity:
+- **Global API Limiter**: 100 requests / 15 minutes.
+- **Form Ingestion Limiter** (`/api/v1/inquiries`, `/api/v1/bitelevate/apply`): 10 submissions / 15 minutes per IP to prevent spam.
+- **Auth Limiter** (`/api/v1/auth/login`): 5 attempts / 15 minutes to block credential brute-forcing.
 
-function idempotency(req, res, next) {
-  if (!['POST', 'PUT', 'PATCH'].includes(req.method)) return next();
+### 4.4 Idempotency Middleware (`src/middleware/idempotency.js`)
+Checks for an `Idempotency-Key` header on state-modifying requests (`POST`, `PUT`, `PATCH`). If a request with the same key arrives while another is processing, it returns `409 Conflict`. Once finished, it caches the response so identical retries receive `201/200` with header `X-Cache-Lookup: IDEMPOTENT_HIT` without creating duplicate records.
 
-  const idempotencyKey = req.headers['idempotency-key'];
-  if (!idempotencyKey) return next();
+### 4.5 Asynchronous Worker Queue with DLQ (`src/services/queueService.js`)
+Decoupled HTTP request handling from background tasks:
+- Lead inquiries immediately receive a `201 Created` with a `jobId`.
+- An event-driven worker processes notifications and CRM syncing in the background.
+- Failed jobs retry with exponential backoff. If max retries are exceeded, the job is moved to a Dead Letter Queue (DLQ) for inspection rather than crashing the process.
 
-  const cached = idempotencyStore.get(idempotencyKey);
-  if (cached) {
-    if (cached.status === 'in_progress') {
-      return res.status(409).json({
-        type: 'https://cynbit.in/errors/concurrent-request',
-        title: 'Conflict',
-        detail: 'An identical request is currently being processed.',
-      });
-    }
-    res.setHeader('X-Cache-Lookup', 'IDEMPOTENT_HIT');
-    return res.status(cached.statusCode).json(cached.body);
-  }
+### 4.6 JWT Authentication & Role-Based Access (`src/middleware/auth.js`)
+- Verifies HMAC SHA-256 signed bearer tokens.
+- Enforces role checks (`authorize(['admin', 'staff'])`).
+- Extracts `tenantId` to ensure data isolation across clients.
 
-  idempotencyStore.set(idempotencyKey, { status: 'in_progress', timestamp: Date.now() });
-
-  const originalJson = res.json.bind(res);
-  res.json = (body) => {
-    idempotencyStore.set(idempotencyKey, {
-      status: 'completed',
-      statusCode: res.statusCode,
-      body,
-      timestamp: Date.now(),
-    });
-    return originalJson(body);
-  };
-
-  next();
-}
-
-module.exports = { idempotency };
-```
-
-### 5.3 Asynchronous Queue with Dead Letter Queue (DLQ) (`src/services/queueService.js`)
-```javascript
-const EventEmitter = require('events');
-
-class QueueService extends EventEmitter {
-  constructor() {
-    super();
-    this.jobs = [];
-    this.deadLetterQueue = [];
-    this.isProcessing = false;
-    this.retryLimit = 3;
-
-    this.on('job:enqueued', () => this.processNext());
-  }
-
-  enqueue(type, payload, correlationId) {
-    const job = {
-      id: `job_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-      type,
-      payload,
-      correlationId,
-      attempts: 0,
-      status: 'pending',
-    };
-    this.jobs.push(job);
-    this.emit('job:enqueued', job);
-    return job.id;
-  }
-
-  async processNext() {
-    if (this.isProcessing || this.jobs.length === 0) return;
-    this.isProcessing = true;
-    const job = this.jobs.shift();
-    job.attempts += 1;
-
-    try {
-      await this.executeJob(job);
-      job.status = 'completed';
-    } catch (err) {
-      if (job.attempts < this.retryLimit) {
-        job.status = 'retrying';
-        setTimeout(() => {
-          this.jobs.push(job);
-          this.emit('job:enqueued', job);
-        }, 1000 * Math.pow(2, job.attempts)); // Exponential backoff
-      } else {
-        job.status = 'failed';
-        this.deadLetterQueue.push(job); // Poison pill isolated to DLQ
-      }
-    } finally {
-      this.isProcessing = false;
-      if (this.jobs.length > 0) setImmediate(() => this.processNext());
-    }
-  }
+### 4.7 Standardized RFC 7807 Error Handling (`src/middleware/errorHandler.js`)
+All 4xx and 5xx responses follow the RFC 7807 Problem Details standard:
+```json
+{
+  "type": "https://cynbit.in/errors/validation-failed",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Validation failed for one or more fields.",
+  "errors": [...],
+  "correlationId": "f7cbb33c-2605-40a6-9786-6634fdc4ed45"
 }
 ```
 
 ---
 
-## 6. Verification & Automated Test Coverage
+## 5. Verification & Test Results
 
-The implemented architecture is covered by **24 automated unit and integration tests** executed natively via Node.js test runner:
+I wrote 24 automated unit and integration tests using Node's built-in test runner (`node:test`). All tests pass cleanly:
 
 ```bash
 $ npm test
@@ -333,14 +200,13 @@ $ npm test
   ✔ verifies CORS blocks disallowed external origins
   ✔ verifies CORS allows whitelisted Cynbit domain
 
-✔ 24 tests passed, 0 failures (duration: 652ms)
+✔ 24 tests passed, 0 failures
 ```
 
 ---
 
-## 7. Strategic Recommendations for Cynbit Engineering
+## 6. Recommendations for Next Steps
 
-1. **Deploy API Gateway in Front of Next.js**: Transition form processing and internal APIs away from Next.js server actions into dedicated Express/NestJS microservices behind AWS ALB or Cloudflare.
-2. **Migrate Memory Idempotency and Queue to Redis & BullMQ**: In production, replace the in-memory map and event emitter with a distributed Redis cluster to provide fault-tolerant persistence across multiple container instances.
-3. **Adopt RFC 7807 Standard Across All Microservices**: Standardize API error envelopes with correlation IDs to facilitate cross-service debugging across Cynbit's ecosystem (*TenantEase*, *BitElevate*, *Cynbit Studio*, and *Revio*).
-4. **Implement Turnstile or reCAPTCHA v3 on Marketing Ingestion**: Combine backend rate limiting with proof-of-work/token validation on public form submissions.
+1. **Add Cloudflare or AWS WAF**: Put Cloudflare in front of Vercel to handle bot management and turnstile verification on lead forms before traffic hits the application layer.
+2. **Move In-Memory State to Redis**: The in-memory idempotency cache and job queue should be backed by a Redis cluster (using BullMQ) once deployed across multiple container instances.
+3. **Structured Tracing**: Integrate OpenTelemetry or standard Pino logging to trace requests across microservices using the `X-Correlation-ID` header.

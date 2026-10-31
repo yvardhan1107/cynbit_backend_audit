@@ -1,12 +1,12 @@
 const { signToken } = require('../middleware/auth');
 
-// Seed test users for demonstration and testing of RBAC
+// Seed test users for demo/testing
 const USERS = [
   {
     id: 'usr_admin_1',
     email: 'admin@cynbit.in',
     password: 'SecureAdminPass2026!',
-    name: 'Cynbit Platform Administrator',
+    name: 'Admin User',
     role: 'admin',
     tenantId: 'cynbit_corp',
   },
@@ -14,7 +14,7 @@ const USERS = [
     id: 'usr_staff_1',
     email: 'admissions@bitelevate.in',
     password: 'StaffSecretPass2026!',
-    name: 'BitElevate Admissions Staff',
+    name: 'Admissions Staff',
     role: 'staff',
     tenantId: 'bitelevate_edu',
   },
@@ -22,7 +22,7 @@ const USERS = [
     id: 'usr_client_1',
     email: 'client@tenantease.in',
     password: 'ClientSecretPass2026!',
-    name: 'TenantEase Enterprise Client',
+    name: 'Enterprise Client',
     role: 'client',
     tenantId: 'tenant_enterprise_42',
   },
@@ -32,7 +32,6 @@ class AuthService {
   async login(email, password) {
     const user = USERS.find((u) => u.email.toLowerCase() === email.toLowerCase());
 
-    // Constant-time check simulation
     if (!user || user.password !== password) {
       return null;
     }
