@@ -1,0 +1,67 @@
+const { signToken } = require('../middleware/auth');
+
+// Seed test users for demonstration and testing of RBAC
+const USERS = [
+  {
+    id: 'usr_admin_1',
+    email: 'admin@cynbit.in',
+    password: 'SecureAdminPass2026!',
+    name: 'Cynbit Platform Administrator',
+    role: 'admin',
+    tenantId: 'cynbit_corp',
+  },
+  {
+    id: 'usr_staff_1',
+    email: 'admissions@bitelevate.in',
+    password: 'StaffSecretPass2026!',
+    name: 'BitElevate Admissions Staff',
+    role: 'staff',
+    tenantId: 'bitelevate_edu',
+  },
+  {
+    id: 'usr_client_1',
+    email: 'client@tenantease.in',
+    password: 'ClientSecretPass2026!',
+    name: 'TenantEase Enterprise Client',
+    role: 'client',
+    tenantId: 'tenant_enterprise_42',
+  },
+];
+
+class AuthService {
+  async login(email, password) {
+    const user = USERS.find((u) => u.email.toLowerCase() === email.toLowerCase());
+
+    // Constant-time check simulation
+    if (!user || user.password !== password) {
+      return null;
+    }
+
+    const tokenPayload = {
+      sub: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      tenantId: user.tenantId,
+    };
+
+    const token = signToken(tokenPayload);
+
+    return {
+      accessToken: token,
+      tokenType: 'Bearer',
+      expiresIn: 3600,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        tenantId: user.tenantId,
+      },
+    };
+  }
+}
+
+const authService = new AuthService();
+
+module.exports = authService;
